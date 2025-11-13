@@ -27,6 +27,7 @@ TUYA_CLIENT_ID = os.getenv("TUYA_CLIENT_ID")
 TUYA_CLIENT_SECRET = os.getenv("TUYA_CLIENT_SECRET")
 TUYA_DEVICE_ID = os.getenv("TUYA_DEVICE_ID")
 DISCORD_ANNOUNCE_CHANNEL_ID = int(os.getenv("DISCORD_ANNOUNCE_CHANNEL_ID", "0"))
+DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
 TUYA_REGION = (os.getenv("TUYA_REGION") or "https://openapi.tuyaeu.com").rstrip("/")
 API_BASE = TUYA_REGION
 
@@ -526,14 +527,14 @@ FAIL_MESSAGES = [
 
 
 POWERDOWN_MESSAGES = [
-	"😴 Rechner schlummert seit {minutes:.1f} Minuten unter {power:.1f} W. Ich ziehe mal den Stecker. Gute Nacht! 🌙",
-	"🔌 Stromsparmodus deluxe: {minutes:.1f} Minuten nur {power:.1f} W. Stecker geht jetzt schlafen.",
-	"🛏️ Unter {power:.1f} W seit {minutes:.1f} Minuten? Klingt nach Schlafenszeit. Klick – aus.",
-	"👋 Der PC tut seit {minutes:.1f} Minuten so, als wär nix los ({power:.1f} W). Ich mach ihm das Licht aus.",
-	"🌌 Idle-Level bei {power:.1f} W über {minutes:.1f} Minuten. Ich beende die Sitzung wie ein Boss.",
-	"🧘‍♂️ Chillige {power:.1f} W seit {minutes:.1f} Minuten. Ich rolle das Stromkabel ein.",
-	"🕯️ Drei Minuten Ruhe, {power:.1f} W Restglühen – Stecker zieht aus.",
-	"🌙 Countdown abgelaufen. {minutes:.1f} Minuten Funkstille bei {power:.1f} W – Licht aus.",
+	"🔌 Strom abgestellt – Server gönnt sich eine Pause.",
+	"🌙 Stecker gezogen, Systems schlafen jetzt.",
+	"🪫 Juice raus, der Rechner macht Feierabend.",
+	"🧊 Plug off, Server chillt offline.",
+	"🌌 Verbindung gekappt, bis zum nächsten Start.",
+	"🚪 Stromtür zu – wir sehen uns beim nächsten Boot.",
+	"🛀 Energie-Siesta aktiviert, Kabel hängt locker.",
+	"🛰️ Uplink getrennt, Server driftet kurz im Orbit.",
 ]
 
 
@@ -567,10 +568,11 @@ SHUTDOWN_CANCEL_MESSAGES = [
 
 
 SHUTDOWN_TIMEOUT_MESSAGES = [
-	"😴 Keine Rückmeldung seit {minutes:.1f} Minuten. Stecker ist jetzt aus.",
-	"🔴 Countdown durchgelaufen – nach {minutes:.1f} Minuten Ruhe den Plug getrennt.",
-	"🌘 Drei Minuten ohne Lebenszeichen. Strom weg, gute Nacht.",
-	"🪫 Keiner hat 'Server läuft, und ist Online.' gesagt – der Plug ruht jetzt.",
+	"🔴 Countdown durchgelaufen – Stecker ausgeschaltet.",
+	"🌘 So ruhig hier... Strom ist aus.",
+	"🪫 Kein Status-Update, Plug gezogen.",
+	"🌙 Shutdown abgeschlossen, Server vom Netz getrennt.",
+	"❄️ Countdown fertig, Stromkabel chillt offline.",
 ]
 
 
@@ -691,8 +693,7 @@ async def _finalize_shutdown_state(target: ShutdownWatcher) -> None:
 
 
 async def _shutdown_countdown(watcher: ShutdownWatcher, metadata: DeviceMetadata) -> None:
-	minutes = SHUTDOWN_TIMEOUT_SECONDS / 60.0
-	await send_channel_message(watcher.channel_id, get_next_shutdown_start())
+	logger.info("Shutdown countdown started: %s", get_next_shutdown_start())
 	try:
 		await asyncio.wait_for(watcher.cancel_event.wait(), timeout=SHUTDOWN_TIMEOUT_SECONDS)
 		logger.info("Shutdown countdown ended early via cancellation (channel=%s)", watcher.channel_id)
@@ -726,10 +727,7 @@ async def _shutdown_countdown(watcher: ShutdownWatcher, metadata: DeviceMetadata
 			return
 
 		if success:
-			await send_channel_message(
-				watcher.channel_id,
-				get_next_shutdown_timeout().format(minutes=minutes, power=0.0),
-			)
+			await send_channel_message(watcher.channel_id, get_next_shutdown_timeout())
 		else:
 			await send_channel_message(
 				watcher.channel_id,
@@ -749,7 +747,11 @@ bot.tree_synced = False
 async def on_ready() -> None:
 	if not bot.tree_synced:
 		try:
-			await bot.tree.sync()
+			if DISCORD_GUILD_ID:
+				guild_obj = discord.Object(id=DISCORD_GUILD_ID)
+				await bot.tree.sync(guild=guild_obj)
+			else:
+				await bot.tree.sync()
 			bot.tree_synced = True
 			logger.info("Slash commands synced successfully.")
 		except Exception as exc:
@@ -794,7 +796,21 @@ async def ensure_shutdown_cleared_on_turnoff() -> None:
 			pass
 
 
-@bot.tree.command(name="bootserver", description="Turn on the smart plug (boot the server).")
+if DISCORD_GUILD_ID:
+	_guild_object = discord.Object(id=DISCORD_GUILD_ID)
+	_bootserver_decorator = bot.tree.command(
+		name="bootserver",
+		description="Turn on the smart plug (boot the server).",
+		guild=_guild_object,
+	)
+else:
+	_bootserver_decorator = bot.tree.command(
+		name="bootserver",
+		description="Turn on the smart plug (boot the server).",
+	)
+
+
+@_bootserver_decorator
 async def bootserver(interaction: discord.Interaction) -> None:
 	await interaction.response.defer(thinking=True)
 	try:
