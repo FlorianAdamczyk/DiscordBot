@@ -44,7 +44,7 @@ logger = logging.getLogger("discordbot")
 
 SHUTDOWN_TRIGGER_SUBSTRING = "Speichern & Herunterfahren wird eingeleitet."
 SHUTDOWN_CANCEL_TEXT = "Server läuft, und ist Online."
-SHUTDOWN_TIMEOUT_SECONDS = 3 * 60
+SHUTDOWN_TIMEOUT_SECONDS = 2 * 60
 METADATA_CACHE_SECONDS = 15 * 60
 TOKEN_SAFETY_MARGIN_MS = 10_000
 
@@ -334,6 +334,7 @@ async def get_device_metadata(
 	access_token: str,
 	force_refresh: bool = False,
 ) -> DeviceMetadata:
+	global _metadata_cache
 	cached: Optional[DeviceMetadata]
 	if not force_refresh:
 		async with _metadata_lock:
@@ -569,10 +570,10 @@ SHUTDOWN_CANCEL_MESSAGES = [
 
 SHUTDOWN_TIMEOUT_MESSAGES = [
 	"🔴 Countdown durchgelaufen – Stecker ausgeschaltet.",
-	"🌘 So ruhig hier... Strom ist aus.",
-	"🪫 Kein Status-Update, Plug gezogen.",
+	"🌘 So ruhig hier... Ich mache den Strom aus.",
+	"🪫 Server ist heruntergefahren. Hab den Stecker gezogen.",
 	"🌙 Shutdown abgeschlossen, Server vom Netz getrennt.",
-	"❄️ Countdown fertig, Stromkabel chillt offline.",
+	"❄️ Server ist aus, Stromkabel wird eingerollt.",
 ]
 
 
@@ -642,6 +643,7 @@ async def send_channel_message(channel_id: int, content: str) -> bool:
 
 
 async def start_shutdown_watch(trigger_message: discord.Message) -> None:
+	global _shutdown_watcher
 	is_on, metadata, _ = await fetch_switch_status()
 	if not is_on:
 		logger.info("Shutdown trigger ignored because the plug is already off.")
@@ -670,6 +672,7 @@ async def start_shutdown_watch(trigger_message: discord.Message) -> None:
 
 
 async def cancel_shutdown_watch(cancel_message: discord.Message) -> bool:
+	global _shutdown_watcher
 	async with _shutdown_lock:
 		watcher = _shutdown_watcher
 		if watcher is None or watcher.channel_id != cancel_message.channel.id:
@@ -687,6 +690,7 @@ async def cancel_shutdown_watch(cancel_message: discord.Message) -> bool:
 
 
 async def _finalize_shutdown_state(target: ShutdownWatcher) -> None:
+	global _shutdown_watcher
 	async with _shutdown_lock:
 		if _shutdown_watcher is target:
 			_shutdown_watcher = None
@@ -772,17 +776,16 @@ async def on_message(message: discord.Message) -> None:
 		elif content.strip() == SHUTDOWN_CANCEL_TEXT:
 			try:
 				cancelled = await cancel_shutdown_watch(message)
-				if not cancelled and DISCORD_ANNOUNCE_CHANNEL_ID > 0:
-					await send_channel_message(
-						DISCORD_ANNOUNCE_CHANNEL_ID,
-						"ℹ️ Shutdown-Abbruch erkannt, aber kein Countdown war aktiv.",
-					)
+				if not cancelled:
+					# Statt eine Discord-Nachricht zu senden, ins Terminal schreiben
+					logger.info("ℹ️ Shutdown-Abbruch erkannt, aber kein Countdown war aktiv.")
 			except Exception as exc:
 				logger.exception("Failed to cancel shutdown countdown: %s", exc)
 	await bot.process_commands(message)
 
 
 async def ensure_shutdown_cleared_on_turnoff() -> None:
+	global _shutdown_watcher
 	async with _shutdown_lock:
 		watcher = _shutdown_watcher
 		if watcher is None:
@@ -796,21 +799,7 @@ async def ensure_shutdown_cleared_on_turnoff() -> None:
 			pass
 
 
-if DISCORD_GUILD_ID:
-	_guild_object = discord.Object(id=DISCORD_GUILD_ID)
-	_bootserver_decorator = bot.tree.command(
-		name="bootserver",
-		description="Turn on the smart plug (boot the server).",
-		guild=_guild_object,
-	)
-else:
-	_bootserver_decorator = bot.tree.command(
-		name="bootserver",
-		description="Turn on the smart plug (boot the server).",
-	)
-
-
-@_bootserver_decorator
+@bot.tree.command(name="bootserver", description="Turn on the smart plug (boot the server).")
 async def bootserver(interaction: discord.Interaction) -> None:
 	await interaction.response.defer(thinking=True)
 	try:
