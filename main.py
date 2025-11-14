@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 import discord
+import discord.abc
 from discord.ext import commands
 from dotenv import load_dotenv
 from flask import Flask
@@ -47,6 +48,8 @@ SHUTDOWN_CANCEL_TEXT = "Server läuft, und ist Online."
 SHUTDOWN_TIMEOUT_SECONDS = 2 * 60
 METADATA_CACHE_SECONDS = 15 * 60
 TOKEN_SAFETY_MARGIN_MS = 10_000
+POWER_IDLE_THRESHOLD_WATTS = float(os.getenv("POWER_IDLE_THRESHOLD_WATTS", "100"))
+POWER_CYCLE_DELAY_SECONDS = int(os.getenv("POWER_CYCLE_DELAY_SECONDS", "90"))
 
 
 # Render requires a web process listening on a port, so keep a tiny Flask app alive.
@@ -446,6 +449,55 @@ def parse_status_result(raw_status: Any) -> Dict[str, StatusEntry]:
 	return status_map
 
 
+POWER_STATUS_KEYWORDS = ("power", "watt", "pwr", "load", "active")
+POWER_PRIORITY = {
+	"cur_power": 0,
+	"current_power": 1,
+	"power": 2,
+	"active_power": 3,
+	"switch_power": 4,
+}
+
+
+def _coerce_power_value(raw_value: Any, scale: Optional[int]) -> Optional[float]:
+	if raw_value is None:
+		return None
+	divisor = 1.0
+	if isinstance(scale, int) and scale > 0:
+		divisor = float(10**scale)
+	try:
+		if isinstance(raw_value, (int, float)):
+			return float(raw_value) / divisor
+		if isinstance(raw_value, str):
+			cleaned = raw_value.strip().lower().replace("w", "").replace(",", ".")
+			if not cleaned:
+				return None
+			value = float(cleaned)
+			return value / divisor
+	except Exception:
+		return None
+	return None
+
+
+def extract_power_watts(status_map: Dict[str, StatusEntry]) -> Optional[float]:
+	candidates: List[Tuple[int, float, StatusEntry]] = []
+	for entry in status_map.values():
+		code_lower = entry.code.lower()
+		if not any(keyword in code_lower for keyword in POWER_STATUS_KEYWORDS):
+			continue
+		watts = _coerce_power_value(entry.value, entry.scale)
+		if watts is None:
+			continue
+		priority = POWER_PRIORITY.get(code_lower, len(POWER_PRIORITY))
+		timestamp = entry.updated_at or 0.0
+		candidates.append((priority, -timestamp, entry))
+	if not candidates:
+		return None
+	candidates.sort(key=lambda item: (item[0], item[1]))
+	best_entry = candidates[0][2]
+	return _coerce_power_value(best_entry.value, best_entry.scale)
+
+
 async def fetch_switch_status(force_metadata_refresh: bool = False) -> Tuple[bool, DeviceMetadata, Dict[str, StatusEntry]]:
 	client = await get_http_client()
 	access_token = await get_access_token(client)
@@ -642,6 +694,43 @@ async def send_channel_message(channel_id: int, content: str) -> bool:
 		return False
 
 
+async def evaluate_shutdown_history(channel: Optional[discord.abc.Messageable]) -> str:
+	"""Return 'trigger', 'cancel', or 'unknown' based on recent bot messages."""
+	if channel is None:
+		return "unknown"
+	try:
+		async for message in channel.history(limit=50):
+			if message.author != bot.user:
+				continue
+			content = message.content or ""
+			if SHUTDOWN_TRIGGER_SUBSTRING.lower() in content.lower():
+				return "trigger"
+			if content.strip() == SHUTDOWN_CANCEL_TEXT:
+				return "cancel"
+	except Exception as exc:
+		logger.warning("Failed to scan message history: %s", exc)
+	return "unknown"
+
+
+async def perform_power_cycle(
+	interaction: discord.Interaction,
+	metadata: DeviceMetadata,
+	pre_message: str,
+	post_message: Optional[str] = None,
+) -> None:
+	await interaction.followup.send(pre_message)
+	success_off, error_off = await set_plug_state(False, metadata=metadata)
+	if not success_off:
+		await interaction.followup.send(get_next_failure().format(error=error_off or "Tuya error"))
+		return
+	await asyncio.sleep(max(5, POWER_CYCLE_DELAY_SECONDS))
+	success_on, error_on = await set_plug_state(True)
+	if success_on:
+		await interaction.followup.send(post_message or "🔁 Stecker wieder eingesteckt.")
+	else:
+		await interaction.followup.send(get_next_failure().format(error=error_on or "Tuya error"))
+
+
 async def start_shutdown_watch(trigger_message: discord.Message) -> None:
 	global _shutdown_watcher
 	is_on, metadata, _ = await fetch_switch_status()
@@ -803,9 +892,39 @@ async def ensure_shutdown_cleared_on_turnoff() -> None:
 async def bootserver(interaction: discord.Interaction) -> None:
 	await interaction.response.defer(thinking=True)
 	try:
-		is_on, metadata, _ = await fetch_switch_status()
+		is_on, metadata, status_map = await fetch_switch_status()
+		power_watts = extract_power_watts(status_map)
+		if power_watts is None:
+			logger.info("Power read: no usable power datapoint found for device %s", TUYA_DEVICE_ID)
+		else:
+			logger.info("Power read: %.2f W for device %s", power_watts, TUYA_DEVICE_ID)
 		if is_on:
-			await interaction.followup.send(get_next_already_on())
+			if power_watts is None:
+				await interaction.followup.send("Stecker ist bereits an, aber ich konnte keinen Leistungswert auslesen. Server bleibt an.")
+				return
+			if power_watts < POWER_IDLE_THRESHOLD_WATTS:
+				await perform_power_cycle(
+					interaction,
+					metadata,
+					"Stecker war noch an! Ich schalte ihn aus und in einer Minute wieder ein. Bitte warte kurz...",
+					"✅ Neustart abgeschlossen – Stecker ist wieder an.",
+				)
+				return
+			state = await evaluate_shutdown_history(interaction.channel)
+			if state == "trigger":
+				await perform_power_cycle(
+					interaction,
+					metadata,
+					"Shutdown-Signal offen – ich starte den Stecker neu in einer Minute.",
+					"✅ Plug wieder an, Server fährt erneut hoch.",
+				)
+				return
+			if state == "cancel":
+				await interaction.followup.send("Server ist an!")
+			else:
+				await interaction.followup.send(
+					f"Server läuft aktuell bei ca. {power_watts:.1f} W und kein Shutdown-Signal ist offen. Ich lasse ihn an.",
+				)
 			return
 
 		success, error = await set_plug_state(True, metadata=metadata)
