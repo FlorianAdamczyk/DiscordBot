@@ -128,27 +128,7 @@ Shutdown‑Flow (vereinfachtes Beispiel):
 - Falls innerhalb von 3 Minuten die Nachricht `Server läuft, und ist Online.` gepostet wird, wird der Timer abgebrochen.
 - Falls nicht, schaltet der Bot die Steckdose aus und postet: z. B. `🔌 Strom abgestellt – Server gönnt sich eine Pause.`
 
-## Troubleshooting
-
-- Slash‑Kommando erscheint nicht:
-  - Prüfe, ob `DISCORD_GUILD_ID` gesetzt ist; es reduziert die Zeit zur Registrierung.
-  - Schau in die Bot‑Logs (Konsole), ob beim Sync Fehler auftreten.
-  - Stelle sicher, dass der Bot in der Ziel‑Guild eingeladen ist und die notwendigen Rechte hat.
-
-- Tuya‑Anfragen schlagen fehl:
-  - Prüfe `TUYA_CLIENT_ID`, `TUYA_CLIENT_SECRET` und `TUYA_DEVICE_ID`.
-  - Vergewissere dich, dass dein Tuya‑Projekt in der richtigen Region arbeitet; passe ggf. `TUYA_REGION` an.
-  - Netzwerk/Firewall prüfen (ausgehende HTTPS‑Requests erlauben).
-
-## Sicherheitshinweise
-
-- Behandle `DISCORD_TOKEN` und Tuya‑Secrets wie Passwörter. Nie öffentlich freigeben.
-- Falls ein Token kompromittiert ist, widerrufe / rotiere ihn sofort via Discord bzw. Tuya Console.
 
 ## Beiträge
 
 Wenn du Verbesserungen vorschlagen willst (z. B. robustere Fehlerroutinen, Tests oder bessere Logging‑Optionen), eröffne bitte einen Pull Request oder Issue im Repository.
-
----
-
-Wenn du möchtest, kann ich jetzt noch eine `README`-Kurzversion (nur das Nötigste) oder ein `README_deploy.md` mit spezielleren Render‑Hinweisen ergänzen.
