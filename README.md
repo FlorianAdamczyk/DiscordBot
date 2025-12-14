@@ -1,20 +1,10 @@
-# Discord Tuya Bot
+# Discord FritzBox Bot
 
-Ein schlanker Discord-Bot zum Ein- und Ausschalten einer Tuya‑Smart‑Plug (z. B. um einen Server zu booten oder abzuschalten). Dieses Repository enthält eine Render-freundliche Web-Heartbeat-Route (Flask), eine schlanke Tuya‑API‑Integration und einen Discord-Slash-Befehl `/bootserver`.
+Ein schlanker Discord-Bot zum Starten eines Servers über Wake-on-LAN per FritzBox. Der Bot verwendet den TR-064-Standard, um direkt mit der FritzBox zu kommunizieren und ein Magic Packet zu senden.
 
 Die README ist auf Deutsch verfasst und erklärt, wie du das Projekt lokal betreibst und auf Render.com deployst.
 
 **Wichtig**: Bewahre alle Tokens und Secrets in deiner lokalen `.env` Datei sicher auf. Vermeide das Einchecken von echten Tokens in ein öffentliches Repo.
-
-**Inhalt dieser Datei**
-- Projektüberblick
-- Voraussetzungen
-- Installation & lokale Ausführung
-- Konfiguration (`.env`)
-- Bereitstellung auf Render.com
-- Benutzung & Verhalten des Bots
-- Fehlerbehebung
-- Sicherheitshinweise
 
 ---
 
@@ -22,133 +12,223 @@ Die README ist auf Deutsch verfasst und erklärt, wie du das Projekt lokal betre
 
 Dieser Bot bietet:
 
-- Slash‑Befehl `/bootserver` um eine Tuya‑Smart‑Plug einzuschalten (Server booten).
-- Wenn die Bot‑Instanz selbst eine Nachricht sendet, die die Phrase
-  "Speichern & Herunterfahren wird eingeleitet." enthält, startet ein 3‑Minuten‑Countdown.
-- Wenn innerhalb der 3 Minuten keine bestätigende Nachricht "Server läuft, und ist Online."
-  gesendet wird, schaltet der Bot die Steckdose aus.
-- Minimaler, stabiler Code: kein komplexes Power‑Monitoring mehr, stattdessen ein robustes Countdown‑Verhalten.
-
-Die kleine Flask‑App sorgt dafür, dass Render (oder ähnliche Plattformen) eine Web‑Route
-zum Healthcheck hat (Port muss geöffnet sein).
-
-## Voraussetzungen
-
-- Python 3.10+ (oder eine aktuelle 3.x Version)
-- Ein Discord Bot Token mit Intent `message_content` aktiviert
-- Tuya Developer Zugang (Client ID / Client Secret) und Device ID der smarten Steckdose
-- `requirements.txt` enthält die Abhängigkeiten (`discord.py`, `httpx`, `python-dotenv`, `flask`)
-
-## Installation & lokale Ausführung
-
-1. Klone das Repository oder navigiere in dein Projektverzeichnis.
-2. Erstelle ein virtuelles Environment und installiere Abhängigkeiten.
-
-PowerShell (empfohlen auf Windows):
-
-```pwsh
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-3. Lege eine `.env` Datei an (siehe Abschnitt Konfiguration).
-4. Starte den Bot lokal (dies startet auch den kleinen Flask‑Webserver auf `PORT`):
-
-```pwsh
-python main.py
-```
-
-Beachte: Der Bot loggt Statusmeldungen in die Konsole. Die Flask‑App läuft in einem Hintergrund‑Thread
-und antwortet auf `/` mit einem kurzen Text für Healthchecks.
-
-## Konfiguration (`.env`)
-
-Lege eine `.env` Datei im Projektordner an (oder passe die vorhandene an). Die `main.py` liest diese Variablen:
-
-- `DISCORD_TOKEN` — Discord Bot Token (z. B. `MT...`)
-- `DISCORD_GUILD_ID` — (optional, empfohlen) ID deines Servers (Guild) für schnelle, guild‑spezifische Slash‑Kommando‑Registrierung
-- `TUYA_CLIENT_ID` — Tuya API Client ID
-- `TUYA_CLIENT_SECRET` — Tuya API Client Secret
-- `TUYA_DEVICE_ID` — Device ID der smarten Steckdose
-- `DISCORD_ANNOUNCE_CHANNEL_ID` — (optional) Kanal‑ID, in den der Bot systemseitig Nachrichten posten darf
-- `PORT` — (optional) Port für die Flask Health‑Route (Render nutzt standardmäßig die Umgebungsvariable `PORT`)
-
-Beispiel `.env` (niemals echte Tokens in ein öffentliches Repo committen):
-
-```ini
-DISCORD_TOKEN="your_discord_token_here"
-DISCORD_GUILD_ID=123456789012345678
-TUYA_CLIENT_ID="..."
-TUYA_CLIENT_SECRET="..."
-TUYA_DEVICE_ID="..."
-DISCORD_ANNOUNCE_CHANNEL_ID=123456789012345678
-PORT=10000
-```
-
-## Deploy auf Render.com
-
-Render erwartet, dass ein Web‑Prozess auf dem von Render gesetzten `PORT` lauscht. Die App startet lokal eine kleine Flask‑App, die genau das macht.
-
-Schritte (Kurzfassung):
-
-1. Neues Web Service auf Render anlegen.
-2. Repo verbinden (GitHub/GitLab).
-3. Build Command: `pip install -r requirements.txt`
-4. Start Command: `python main.py`
-5. Setze Secrets/Environment Variables im Render Dashboard (DISCORD_TOKEN, TUYA_..., DISCORD_GUILD_ID, etc.).
-
-Wichtig: Render setzt die Umgebungsvariable `PORT` automatisch; die Flask‑App in `main.py` liest diese Variable.
-
-## Nutzung & Verhalten
-
-- Slash‑Kommando `/bootserver`: Schaltet die konfigurierte Tuya‑Steckdose ein. Wenn bereits an, antwortet der Bot mit einer freundlichen Meldung.
-- Shutdown‑Trigger: Wenn der Bot selbst (oder ein anderes Script mit dem Bot) eine Nachricht sendet, die die Phrase
-  "Speichern & Herunterfahren wird eingeleitet." enthält, startet ein 3‑Minuten‑Countdown (nur wenn der Plug an ist).
-- Bestätigung: Wird innerhalb der 3 Minuten eine Nachricht mit exakt `Server läuft, und ist Online.` gepostet,
-  wird der Countdown abgebrochen.
-- Timeout: Erfolgt keine Bestätigung, schaltet der Bot die Steckdose aus und postet eine kurze, entspannte Meldung.
-
-Hinweis zur Slash‑Kommando‑Registrierung:
-Wenn du `DISCORD_GUILD_ID` in `.env` setzt, registriert sich `/bootserver` als guild‑lokales Kommando — dadurch ist die Registrierung praktisch sofort sichtbar (statt auf die globale Registration warten zu müssen).
-
-## Beispiele
-
-Booten per Slash:
-
-1. Öffne Discord in deinem Server.
-2. Tippe `/bootserver` und bestätige.
-
-Shutdown‑Flow (vereinfachtes Beispiel):
-
-- Ein anderes Script / Service / Bot postet in einem Kanal (oder du postest manuell) eine Nachricht, die die Phrase enthält:
-  `... Speichern & Herunterfahren wird eingeleitet. ...`
-- Der Bot startet intern einen 3‑Minuten‑Timer.
-- Falls innerhalb von 3 Minuten die Nachricht `Server läuft, und ist Online.` gepostet wird, wird der Timer abgebrochen.
-- Falls nicht, schaltet der Bot die Steckdose aus und postet: z. B. `🔌 Strom abgestellt – Server gönnt sich eine Pause.`
-
-## Troubleshooting
-
-- Slash‑Kommando erscheint nicht:
-  - Prüfe, ob `DISCORD_GUILD_ID` gesetzt ist; es reduziert die Zeit zur Registrierung.
-  - Schau in die Bot‑Logs (Konsole), ob beim Sync Fehler auftreten.
-  - Stelle sicher, dass der Bot in der Ziel‑Guild eingeladen ist und die notwendigen Rechte hat.
-
-- Tuya‑Anfragen schlagen fehl:
-  - Prüfe `TUYA_CLIENT_ID`, `TUYA_CLIENT_SECRET` und `TUYA_DEVICE_ID`.
-  - Vergewissere dich, dass dein Tuya‑Projekt in der richtigen Region arbeitet; passe ggf. `TUYA_REGION` an.
-  - Netzwerk/Firewall prüfen (ausgehende HTTPS‑Requests erlauben).
-
-## Sicherheitshinweise
-
-- Behandle `DISCORD_TOKEN` und Tuya‑Secrets wie Passwörter. Nie öffentlich freigeben.
-- Falls ein Token kompromittiert ist, widerrufe / rotiere ihn sofort via Discord bzw. Tuya Console.
-
-## Beiträge
-
-Wenn du Verbesserungen vorschlagen willst (z. B. robustere Fehlerroutinen, Tests oder bessere Logging‑Optionen), eröffne bitte einen Pull Request oder Issue im Repository.
+- **Slash-Befehl `/bootserver`**: Sendet ein Wake-on-LAN Magic Packet über die FritzBox an den Server
+- **FritzBox TR-064 Integration**: Nutzt den offiziellen TR-064-Standard für sichere HTTPS-Kommunikation
+- **Minimaler Code**: Nur das Nötigste für die WOL-Funktionalität
+- **Flask Webserver**: Für Hosting-Plattformen wie Render.com, die einen Healthcheck-Endpoint benötigen
 
 ---
 
-Wenn du möchtest, kann ich jetzt noch eine `README`-Kurzversion (nur das Nötigste) oder ein `README_deploy.md` mit spezielleren Render‑Hinweisen ergänzen.
+## Voraussetzungen
+
+### Technische Anforderungen
+- Python 3.10+ (oder eine aktuelle 3.x Version)
+- Ein Discord Bot Token mit Intent `message_content` aktiviert
+- Eine FritzBox mit:
+  - TR-064 über HTTPS aktiviert
+  - Einem konfigurierten Benutzer für den Bot
+  - Wake-on-LAN Unterstützung
+- Die MAC-Adresse des zu startenden Servers
+
+### FritzBox Konfiguration
+
+1. **TR-064 aktivieren**:
+   - Öffne die FritzBox-Oberfläche (z.B. `fritz.box` oder `192.168.178.1`)
+   - Gehe zu: **Heimnetz** → **Netzwerk** → **Netzwerkeinstellungen**
+   - Aktiviere: **Zugriff für Anwendungen zulassen** (TR-064-Protokoll über HTTPS)
+
+2. **Benutzer anlegen**:
+   - Gehe zu: **System** → **FRITZ!Box-Benutzer**
+   - Klicke auf **Benutzer hinzufügen**
+   - Name: `discordbot` (oder ein anderer Name)
+   - Passwort: Ein starkes, langes Passwort
+   - Rechte: **FRITZ!Box Einstellungen**
+
+3. **DynDNS einrichten** (optional, aber empfohlen):
+   - Gehe zu: **Internet** → **Freigaben** → **DynDNS**
+   - Konfiguriere einen DynDNS-Dienst (z.B. `meinserver.ddns.net`)
+   - Dies ermöglicht den Zugriff von außen
+
+4. **MAC-Adresse ermitteln**:
+   - Windows: `ipconfig /all` → "Physische Adresse"
+   - Linux/Mac: `ip link` oder `ifconfig` → "ether" oder "HWaddr"
+   - Format: `AA:BB:CC:DD:EE:FF`
+
+---
+
+## Installation & lokale Ausführung
+
+1. **Repository klonen** oder in dein Projektverzeichnis navigieren
+
+2. **Virtuelles Environment erstellen und Abhängigkeiten installieren**
+
+   PowerShell (Windows):
+   ```pwsh
+   python -m venv .venv
+   .\.venv\Scripts\Activate.ps1
+   pip install -r requirements.txt
+   ```
+
+   Bash (Linux/Mac):
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+
+3. **`.env` Datei erstellen**
+
+   Kopiere `.env.example` zu `.env` und fülle die Werte aus:
+   ```
+   DISCORD_TOKEN=dein_discord_bot_token
+   FRITZ_IP=meinserver.ddns.net
+   FRITZ_USER=discordbot
+   FRITZ_PASSWORD=dein_fritzbox_passwort
+   SERVER_MAC=AA:BB:CC:DD:EE:FF
+   FRITZ_PORT=44443
+   ```
+
+4. **Bot starten**
+
+   ```pwsh
+   python main.py
+   ```
+
+   Der Bot sollte sich bei Discord einloggen und die Slash-Commands synchronisieren.
+
+---
+
+## Konfiguration (`.env`)
+
+| Variable | Beschreibung | Beispiel |
+|----------|--------------|----------|
+| `DISCORD_TOKEN` | Dein Discord Bot Token | `MTA1Nz...` |
+| `FRITZ_IP` | FritzBox IP oder DynDNS-Adresse | `meinserver.ddns.net` |
+| `FRITZ_USER` | FritzBox-Benutzername | `discordbot` |
+| `FRITZ_PASSWORD` | FritzBox-Passwort | `MeinSicheresPasswort123!` |
+| `SERVER_MAC` | MAC-Adresse des Servers | `AA:BB:CC:DD:EE:FF` |
+| `FRITZ_PORT` | HTTPS-Port der FritzBox | `44443` (Standard) |
+| `LOG_LEVEL` | Logging-Level (optional) | `INFO` oder `DEBUG` |
+| `PORT` | Flask Webserver Port (optional) | `10000` |
+
+---
+
+## Bereitstellung auf Render.com
+
+1. **Erstelle einen neuen Web Service** auf [Render.com](https://render.com)
+
+2. **Verbinde dein GitHub Repository**
+
+3. **Konfiguration**:
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python main.py`
+   - **Environment**: `Python 3`
+
+4. **Environment Variables** hinzufügen:
+   - Füge alle Werte aus deiner `.env` Datei als Environment Variables hinzu
+   - Render verschlüsselt diese automatisch
+
+5. **Deploy**: Render startet automatisch den Build und Deploy-Prozess
+
+Der Flask-Webserver läuft auf Port 10000 (oder dem von Render zugewiesenen Port) und beantwortet Healthchecks.
+
+---
+
+## Benutzung & Verhalten des Bots
+
+### `/bootserver` Befehl
+
+1. Benutzer gibt `/bootserver` in Discord ein
+2. Bot antwortet: "🔍 Versuche FritzBox zu erreichen..."
+3. Bot verbindet sich zur FritzBox über HTTPS
+4. Bot authentifiziert sich mit Benutzername und Passwort
+5. Bot sendet Wake-on-LAN Befehl mit der konfigurierten MAC-Adresse
+6. Bei Erfolg: "✅ Magic Packet gesendet! Server fährt hoch. Bitte 2 Min warten."
+7. Bei Fehler: Fehlermeldung mit Details
+
+### Was passiert im Hintergrund?
+
+1. **SSL-Verbindung**: Der Bot nutzt HTTPS (Port 44443) für sichere Kommunikation
+2. **TR-064 Protokoll**: Standard-Schnittstelle für FritzBox-Steuerung
+3. **Wake-on-LAN**: Die FritzBox sendet ein Magic Packet an die angegebene MAC-Adresse
+4. **Server startet**: Der Server (falls WOL im BIOS aktiviert ist) fährt hoch
+
+---
+
+## Fehlerbehebung
+
+### Bot kann FritzBox nicht erreichen
+
+- **Prüfe die IP/DynDNS**: Ist `FRITZ_IP` korrekt?
+- **Prüfe den Port**: Standard ist `44443` für HTTPS
+- **Firewall**: Ist der Port von außen erreichbar? (Falls der Bot extern läuft)
+- **TR-064 aktiviert**: Siehe "FritzBox Konfiguration" oben
+
+### "Authentication failed" oder ähnliche Fehler
+
+- **Benutzername/Passwort**: Sind `FRITZ_USER` und `FRITZ_PASSWORD` korrekt?
+- **Benutzerrechte**: Hat der Benutzer die richtigen Rechte in der FritzBox?
+- **Passwort-Sonderzeichen**: Manche Sonderzeichen können Probleme machen - teste mit alphanumerischem Passwort
+
+### Server startet nicht
+
+- **Wake-on-LAN aktiviert**: Im BIOS/UEFI des Servers muss WOL aktiviert sein
+- **Netzwerkkabel**: WOL funktioniert meist nur über Kabel, nicht über WLAN
+- **MAC-Adresse**: Ist die MAC-Adresse korrekt? (Groß-/Kleinschreibung egal)
+- **Netzwerk**: Ist der Server im gleichen Netzwerk wie die FritzBox?
+
+### Bot startet nicht
+
+- **Dependencies**: `pip install -r requirements.txt` ausführen
+- **Python-Version**: Mindestens Python 3.10
+- **Environment Variables**: Alle erforderlichen Variablen gesetzt?
+- **Discord Token**: Ist der Token gültig und der Bot in deinem Server?
+
+### Slash-Command wird nicht angezeigt
+
+- **Berechtigungen**: Hat der Bot die `applications.commands` Berechtigung?
+- **Synchronisation**: Warte ein paar Minuten - Discord kann bis zu einer Stunde brauchen
+- **Bot Invite**: Wurde der Bot mit dem richtigen Scope eingeladen? (`bot` + `applications.commands`)
+
+---
+
+## Sicherheitshinweise
+
+- **Niemals** Passwörter oder Tokens im Code oder in öffentlichen Repos speichern
+- Nutze `.env` Dateien für lokale Entwicklung
+- Auf Hosting-Plattformen: Environment Variables verwenden
+- `.env` sollte in `.gitignore` stehen (ist bereits enthalten)
+- FritzBox-Benutzer mit minimalen Rechten anlegen
+- HTTPS (nicht HTTP) für FritzBox-Verbindung verwenden
+- Regelmäßig Passwörter ändern
+
+---
+
+## Dependencies
+
+- **discord.py**: Discord Bot Framework
+- **python-dotenv**: Environment Variables laden
+- **flask**: Webserver für Healthchecks
+- **fritzconnection**: FritzBox TR-064 Bibliothek
+
+Siehe `requirements.txt` für genaue Versionen.
+
+---
+
+## Lizenz
+
+Dieses Projekt ist für private Nutzung gedacht. Siehe LICENSE Datei (falls vorhanden).
+
+---
+
+## Support
+
+Bei Fragen oder Problemen:
+1. Prüfe die Fehlerbehebung oben
+2. Schaue in die Logs (`LOG_LEVEL=DEBUG` in `.env` setzen)
+3. Prüfe die FritzBox-Einstellungen
+4. Erstelle ein GitHub Issue mit detaillierten Informationen
+
+---
+
+**Viel Erfolg mit deinem Discord FritzBox Bot!** 🚀
