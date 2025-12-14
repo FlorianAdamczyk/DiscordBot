@@ -12,6 +12,8 @@ load_dotenv()
 
 # Environment Variables
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
+DISCORD_GUILD_ID = int(os.getenv("DISCORD_GUILD_ID", "0"))
+DISCORD_ANNOUNCE_CHANNEL_ID = int(os.getenv("DISCORD_ANNOUNCE_CHANNEL_ID", "0"))
 FRITZ_IP = os.getenv("FRITZ_IP")
 FRITZ_USER = os.getenv("FRITZ_USER")
 FRITZ_PASSWORD = os.getenv("FRITZ_PASSWORD")
@@ -57,8 +59,13 @@ async def on_ready():
     logger.info(f"Bot eingeloggt als {bot.user}")
     await bot.change_presence(activity=discord.Game(name="Warte auf Befehle"))
     try:
-        synced = await bot.tree.sync()
-        logger.info(f"{len(synced)} Slash Commands synchronisiert")
+        if DISCORD_GUILD_ID > 0:
+            guild = discord.Object(id=DISCORD_GUILD_ID)
+            synced = await bot.tree.sync(guild=guild)
+            logger.info(f"{len(synced)} Slash Commands für Guild {DISCORD_GUILD_ID} synchronisiert")
+        else:
+            synced = await bot.tree.sync()
+            logger.info(f"{len(synced)} Slash Commands global synchronisiert")
     except Exception as e:
         logger.error(f"Fehler beim Synchronisieren der Commands: {e}")
 
@@ -98,9 +105,18 @@ async def bootserver(interaction: discord.Interaction):
         
         # Schritt 3: Erfolg melden
         logger.info(f"Wake-on-LAN erfolgreich gesendet: {result}")
-        await interaction.followup.send(
-            "✅ Magic Packet gesendet! Server fährt hoch. Bitte 2 Min warten."
-        )
+        success_message = "✅ Magic Packet gesendet! Server fährt hoch. Bitte 2 Min warten."
+        await interaction.followup.send(success_message)
+        
+        # Optionale Ankündigung im Channel
+        if DISCORD_ANNOUNCE_CHANNEL_ID > 0:
+            try:
+                channel = bot.get_channel(DISCORD_ANNOUNCE_CHANNEL_ID)
+                if channel:
+                    await channel.send(f"🚀 **Server wird hochgefahren!**")
+                    logger.info(f"Ankündigung an Channel {DISCORD_ANNOUNCE_CHANNEL_ID} gesendet")
+            except Exception as e:
+                logger.warning(f"Fehler beim Senden der Ankündigung: {e}")
         
     except Exception as e:
         # Fehlerbehandlung
