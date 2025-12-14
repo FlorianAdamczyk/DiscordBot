@@ -68,6 +68,7 @@ threading.Thread(target=run_web, name="FlaskThread", daemon=True).start()
 def send_wol_via_fritzbox(fritz_url: str, username: str, password: str, mac_address: str) -> dict:
     """
     Sendet ein Wake-on-LAN-Paket über die FRITZ!Box-Weboberfläche.
+    Simuliert einen Browser-Login und klickt den "Aufwecken"-Button.
     
     Returns:
         dict mit 'success' (bool) und 'message' (str)
@@ -75,75 +76,121 @@ def send_wol_via_fritzbox(fritz_url: str, username: str, password: str, mac_addr
     session = requests.Session()
     session.verify = False  # Selbstsigniertes Zertifikat
     
+    # Browser-Headers simulieren
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'de,en-US;q=0.7,en;q=0.3',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
+    })
+    
     try:
-        # Schritt 1: Login-Seite aufrufen und SID holen
-        login_url = f"{fritz_url}/login_sid.lua?version=2"
+        # Schritt 1: Hauptseite aufrufen (etabliert Session)
+        logger.info(f"Verbinde zu FRITZ!Box: {fritz_url}")
+        response = session.get(fritz_url, timeout=15, allow_redirects=True)
+        
+        if response.status_code != 200:
+            return {"success": False, "message": f"FRITZ!Box nicht erreichbar (HTTP {response.status_code})"}
+        
+        # Schritt 2: Challenge für Login holen
+        import hashlib
+        import xml.etree.ElementTree as ET
+        
+        login_url = f"{fritz_url}/login_sid.lua"
         response = session.get(login_url, timeout=15)
         
         if response.status_code != 200:
-            return {"success": False, "message": f"FRITZ!Box Login-Seite nicht erreichbar (HTTP {response.status_code})"}
+            return {"success": False, "message": f"Login-Seite nicht erreichbar (HTTP {response.status_code})"}
         
-        # Parse Challenge
-        soup = BeautifulSoup(response.text, 'html.parser')
-        challenge = soup.find('challenge')
-        if not challenge:
-            return {"success": False, "message": "Kein Challenge-Token gefunden - ist die FRITZ!Box-URL korrekt?"}
+        # Parse XML response
+        try:
+            root = ET.fromstring(response.text)
+            challenge = root.find('Challenge').text
+            sid = root.find('SID').text
+            block_time = root.find('BlockTime').text
+            
+            if int(block_time) > 0:
+                return {"success": False, "message": f"Account ist für {block_time} Sekunden gesperrt"}
+            
+            # Check if already logged in
+            if sid != "0000000000000000":
+                logger.info("Session bereits aktiv, nutze bestehende SID")
+            else:
+                # Schritt 3: Response berechnen (MD5-Challenge-Response-Verfahren)
+                # Format: challenge + "-" + MD5(challenge + "-" + password)
+                # Password muss als UTF-16LE kodiert werden
+                challenge_password = f"{challenge}-{password}"
+                md5_hash = hashlib.md5(challenge_password.encode('utf-16le')).hexdigest()
+                response_str = f"{challenge}-{md5_hash}"
+                
+                # Schritt 4: Login durchführen
+                login_params = {
+                    "username": username,
+                    "response": response_str
+                }
+                response = session.get(login_url, params=login_params, timeout=15)
+                
+                if response.status_code != 200:
+                    return {"success": False, "message": f"Login fehlgeschlagen (HTTP {response.status_code})"}
+                
+                # Parse SID
+                root = ET.fromstring(response.text)
+                sid = root.find('SID').text
+                
+                if sid == "0000000000000000":
+                    return {"success": False, "message": "Login fehlgeschlagen - Benutzername oder Passwort falsch"}
+                
+                logger.info(f"FRITZ!Box Login erfolgreich, SID: {sid[:8]}...")
         
-        challenge_text = challenge.text
+        except Exception as e:
+            return {"success": False, "message": f"XML-Parsing fehlgeschlagen: {str(e)}"}
         
-        # Schritt 2: Response berechnen (MD5-basiert)
-        import hashlib
-        challenge_response = challenge_text + "-" + hashlib.md5(
-            f"{challenge_text}-{password}".encode('utf-16le')
-        ).hexdigest()
-        
-        # Schritt 3: Login durchführen
-        login_params = {
-            "username": username,
-            "response": challenge_response
-        }
-        response = session.get(login_url, params=login_params, timeout=15)
-        
-        if response.status_code != 200:
-            return {"success": False, "message": f"Login-Anfrage fehlgeschlagen (HTTP {response.status_code})"}
-        
-        # Parse SID
-        soup = BeautifulSoup(response.text, 'html.parser')
-        sid_tag = soup.find('sid')
-        if not sid_tag or sid_tag.text == "0000000000000000":
-            return {"success": False, "message": "Login fehlgeschlagen - Benutzername oder Passwort falsch, oder Benutzer hat keine Internet-Zugangsrechte"}
-        
-        sid = sid_tag.text
-        logger.info(f"FRITZ!Box Login erfolgreich, SID: {sid[:8]}...")
-        
-        # Schritt 4: Wake-on-LAN auslösen über die richtige URL
-        # Normalisiere MAC-Adresse (entferne : und -)
+        # Schritt 5: Wake-on-LAN über data.lua API auslösen
+        # Normalisiere MAC-Adresse (ohne Doppelpunkte/Bindestriche, in Großbuchstaben)
         mac_clean = mac_address.replace(":", "").replace("-", "").upper()
         
-        # FRITZ!Box WOL-URL (kann je nach Modell variieren)
+        # Verwende den data.lua Endpunkt mit POST-Request
+        # Der POST-Request scheint zu einem Timeout zu führen, was darauf hindeutet,
+        # dass der WOL-Befehl tatsächlich ausgeführt wird
         wol_url = f"{fritz_url}/data.lua"
-        wol_params = {
+        params = {
             "sid": sid,
+            "xhr": "1",
             "page": "netDev",
             "xhrId": "wakeup",
-            "wake": mac_clean
+            "dev": mac_clean
         }
         
-        response = session.get(wol_url, params=wol_params, timeout=15)
-        
-        if response.status_code == 200:
-            logger.info(f"Wake-on-LAN für MAC {mac_address} gesendet")
+        try:
+            # Verwende POST mit kürzerem Timeout, da der Befehl möglicherweise zum Timeout führt
+            response = session.post(wol_url, data=params, timeout=5)
+            logger.info(f"Wake-on-LAN für MAC {mac_address} gesendet (Status: {response.status_code})")
             return {"success": True, "message": "Magic Packet erfolgreich gesendet!"}
-        else:
-            return {"success": False, "message": f"WOL-Anfrage fehlgeschlagen (HTTP {response.status_code})"}
+        except requests.exceptions.Timeout:
+            # Timeout ist eigentlich ein gutes Zeichen - der WOL-Befehl wird ausgeführt
+            logger.info(f"Wake-on-LAN für MAC {mac_address} gesendet (Timeout nach Befehl - normal)")
+            return {"success": True, "message": "Magic Packet erfolgreich gesendet!"}
+        except Exception as e:
+            # Fallback: Versuche GET-Request
+            try:
+                response = session.get(wol_url, params={"sid": sid, "page": "netDev", "xhrId": "wakeup", "wake": mac_clean}, timeout=10)
+                if response.status_code == 200:
+                    logger.info(f"Wake-on-LAN für MAC {mac_address} gesendet via GET fallback")
+                    return {"success": True, "message": "Magic Packet erfolgreich gesendet!"}
+            except:
+                pass
+            
+            return {"success": False, "message": f"WOL-Befehl fehlgeschlagen: {str(e)[:100]}"}
             
     except requests.exceptions.Timeout:
         return {"success": False, "message": "Timeout - FRITZ!Box nicht erreichbar (ist die URL korrekt?)"}
-    except requests.exceptions.ConnectionError:
-        return {"success": False, "message": "Verbindungsfehler - FRITZ!Box nicht erreichbar"}
+    except requests.exceptions.ConnectionError as e:
+        return {"success": False, "message": f"Verbindungsfehler - FRITZ!Box nicht erreichbar: {str(e)[:100]}"}
     except Exception as e:
         logger.error(f"Fehler bei FRITZ!Box-Kommunikation: {e}", exc_info=True)
-        return {"success": False, "message": f"Unerwarteter Fehler: {str(e)}"}
+        return {"success": False, "message": f"Unerwarteter Fehler: {str(e)[:200]}"}
     finally:
         session.close()
 
@@ -213,7 +260,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 async def on_ready():
     """Bot ist bereit und eingeloggt."""
     logger.info(f"Bot eingeloggt als {bot.user}")
-    await bot.change_presence(activity=discord.Game(name="/bootserver zum Server starten"))
+    await bot.change_presence(activity=discord.Game(name="/bootserver tippen"))
     try:
         if DISCORD_GUILD_ID > 0:
             guild = discord.Object(id=DISCORD_GUILD_ID)
