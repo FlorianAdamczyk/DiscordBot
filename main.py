@@ -37,7 +37,7 @@ app = Flask(__name__)
 
 @app.get("/")
 def home() -> tuple[str, int]:
-    return "✅ Discord FritzBox Bot is running!", 200
+    return "✅ Ich bin bereit und warte auf deinen /bootserver Befehl!", 200
 
 
 def run_web() -> None:
