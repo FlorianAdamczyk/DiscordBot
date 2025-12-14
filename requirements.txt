@@ -1,4 +1,6 @@
 discord.py
 python-dotenv
 flask
-fritzconnection
+requests
+beautifulsoup4
+urllib3
