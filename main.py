@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta
+import asyncio
 
 import discord
 from discord.ext import commands
@@ -147,42 +148,92 @@ def send_wol_via_fritzbox(fritz_url: str, username: str, password: str, mac_addr
         except Exception as e:
             return {"success": False, "message": f"XML-Parsing fehlgeschlagen: {str(e)}"}
         
-        # Schritt 5: Wake-on-LAN über data.lua API auslösen
-        # Normalisiere MAC-Adresse (ohne Doppelpunkte/Bindestriche, in Großbuchstaben)
-        mac_clean = mac_address.replace(":", "").replace("-", "").upper()
+        # Schritt 5: UID des Zielgeräts ermitteln (netDev -> devices)
+        # Wichtig: bei Zugriff über myfritz.net sind viele alte *.lua-Pfade 404.
+        # Referer daher auf eine existierende Seite setzen.
+        session.headers.update({
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": f"{fritz_url}/",
+            "Origin": fritz_url,
+        })
+        devices_resp = session.post(
+            f"{fritz_url}/data.lua",
+            data={"sid": sid, "xhr": "1", "page": "netDev", "xhrId": "devices"},
+            timeout=15,
+        )
+        if devices_resp.status_code != 200:
+            return {"success": False, "message": f"Geräteliste nicht abrufbar (HTTP {devices_resp.status_code})"}
         
-        # Verwende den data.lua Endpunkt mit POST-Request
-        # Der POST-Request scheint zu einem Timeout zu führen, was darauf hindeutet,
-        # dass der WOL-Befehl tatsächlich ausgeführt wird
+        uid = None
+        try:
+            data_json = devices_resp.json()
+            active = data_json.get("data", {}).get("active", [])
+            passive = data_json.get("data", {}).get("passive", [])
+            target_mac = mac_address.upper()
+            for dev in active + passive:
+                if dev.get("mac", "").upper() == target_mac:
+                    uid = dev.get("UID")
+                    break
+        except Exception as ex:
+            logger.debug(f"Parsing Geräte-JSON fehlgeschlagen: {ex}")
+        
+        if not uid:
+            return {
+                "success": False,
+                "message": "Geräte-UID nicht gefunden – ist die MAC korrekt und ist das Gerät in der FRITZ!Box-Liste vorhanden?",
+            }
+        
+        # Schritt 6: Wake-on-LAN über UID auslösen
+        # Wir senden die gleiche XHR-Form wie die Weboberfläche. Einige FRITZ!OS-Versionen
+        # erwarten zusätzlich ein "lang"-Feld.
         wol_url = f"{fritz_url}/data.lua"
-        params = {
+        wol_params = {
             "sid": sid,
             "xhr": "1",
+            "lang": "de",
             "page": "netDev",
             "xhrId": "wakeup",
-            "dev": mac_clean
+            "dev": uid,
         }
-        
-        try:
-            # Verwende POST mit kürzerem Timeout, da der Befehl möglicherweise zum Timeout führt
-            response = session.post(wol_url, data=params, timeout=5)
-            logger.info(f"Wake-on-LAN für MAC {mac_address} gesendet (Status: {response.status_code})")
-            return {"success": True, "message": "Magic Packet erfolgreich gesendet!"}
-        except requests.exceptions.Timeout:
-            # Timeout ist eigentlich ein gutes Zeichen - der WOL-Befehl wird ausgeführt
-            logger.info(f"Wake-on-LAN für MAC {mac_address} gesendet (Timeout nach Befehl - normal)")
-            return {"success": True, "message": "Magic Packet erfolgreich gesendet!"}
-        except Exception as e:
-            # Fallback: Versuche GET-Request
+
+        # Manche Boxen reagieren zickig; 2 schnelle Versuche erhöhen die Chance,
+        # dass der Aufweck-Request akzeptiert wird.
+        last_status = None
+        last_text = ""
+        for attempt in (1, 2):
             try:
-                response = session.get(wol_url, params={"sid": sid, "page": "netDev", "xhrId": "wakeup", "wake": mac_clean}, timeout=10)
+                response = session.post(wol_url, data=wol_params, timeout=12)
+                last_status = response.status_code
+                last_text = response.text or ""
+
+                # Plausibilitätscheck: wir erwarten JSON mit pid=netDev
+                ok = False
                 if response.status_code == 200:
-                    logger.info(f"Wake-on-LAN für MAC {mac_address} gesendet via GET fallback")
+                    try:
+                        js = response.json()
+                        ok = js.get("pid") == "netDev"
+                    except Exception:
+                        ok = "error" not in last_text.lower()
+
+                logger.info(
+                    f"Wake-on-LAN Request (attempt {attempt}) via UID {uid} gesendet (Status: {response.status_code})"
+                )
+
+                if ok:
                     return {"success": True, "message": "Magic Packet erfolgreich gesendet!"}
-            except:
-                pass
-            
-            return {"success": False, "message": f"WOL-Befehl fehlgeschlagen: {str(e)[:100]}"}
+
+                time.sleep(0.4)
+            except requests.exceptions.Timeout:
+                # Timeout ist nicht zwingend ein Erfolg; aber bei manchen Boxen kommt die Antwort spät.
+                logger.info(f"Wake-on-LAN Request (attempt {attempt}) Timeout – wiederhole ggf.")
+                time.sleep(0.4)
+                continue
+
+        return {
+            "success": False,
+            "message": f"WOL-Request wurde gesendet, aber keine gültige Bestätigung erhalten (HTTP {last_status}).",
+        }
             
     except requests.exceptions.Timeout:
         return {"success": False, "message": "Timeout - FRITZ!Box nicht erreichbar (ist die URL korrekt?)"}
@@ -191,6 +242,121 @@ def send_wol_via_fritzbox(fritz_url: str, username: str, password: str, mac_addr
     except Exception as e:
         logger.error(f"Fehler bei FRITZ!Box-Kommunikation: {e}", exc_info=True)
         return {"success": False, "message": f"Unerwarteter Fehler: {str(e)[:200]}"}
+    finally:
+        session.close()
+
+
+def _fritz_login_and_get_sid(session: requests.Session, fritz_url: str, username: str, password: str) -> str:
+    import hashlib
+    import xml.etree.ElementTree as ET
+
+    login_url = f"{fritz_url}/login_sid.lua"
+    response = session.get(login_url, timeout=15)
+    response.raise_for_status()
+
+    root = ET.fromstring(response.text)
+    challenge = root.find('Challenge').text
+    sid = root.find('SID').text
+    block_time = root.find('BlockTime').text
+    if int(block_time) > 0:
+        raise RuntimeError(f"Account ist für {block_time} Sekunden gesperrt")
+
+    if sid != "0000000000000000":
+        return sid
+
+    challenge_password = f"{challenge}-{password}"
+    md5_hash = hashlib.md5(challenge_password.encode('utf-16le')).hexdigest()
+    response_str = f"{challenge}-{md5_hash}"
+
+    response = session.get(login_url, params={"username": username, "response": response_str}, timeout=15)
+    response.raise_for_status()
+
+    root = ET.fromstring(response.text)
+    sid = root.find('SID').text
+    if sid == "0000000000000000":
+        raise RuntimeError("Login fehlgeschlagen (SID=0)")
+    return sid
+
+
+def _fritz_fetch_netdev_devices(session: requests.Session, fritz_url: str, sid: str) -> dict:
+    session.headers.update({
+        "Accept": "application/json, text/plain, */*",
+        "X-Requested-With": "XMLHttpRequest",
+        "Referer": f"{fritz_url}/",
+        "Origin": fritz_url,
+    })
+    resp = session.post(
+        f"{fritz_url}/data.lua",
+        data={"sid": sid, "xhr": "1", "page": "netDev", "xhrId": "devices"},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _fritz_find_device_by_mac(devices_json: dict, mac_address: str) -> tuple[str | None, str | None, bool | None]:
+    target_mac = mac_address.upper()
+    data = devices_json.get("data", {})
+    for dev in (data.get("active", []) + data.get("passive", [])):
+        if dev.get("mac", "").upper() == target_mac:
+            uid = dev.get("UID")
+            name = dev.get("name")
+            state_class = None
+            state = dev.get("state")
+            if isinstance(state, dict):
+                state_class = state.get("class")
+            is_online = state_class == "globe_online"
+            return uid, name, is_online
+    return None, None, None
+
+
+def confirm_device_online_via_fritzbox(
+    fritz_url: str,
+    username: str,
+    password: str,
+    mac_address: str,
+    wait_seconds: int = 150,
+    poll_interval: int = 10,
+) -> dict:
+    """Pollt die FRITZ!Box netDev-Geräteliste und prüft, ob das Gerät online wird."""
+    session = requests.Session()
+    session.verify = False
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept-Language': 'de,en-US;q=0.7,en;q=0.3',
+        'Connection': 'keep-alive',
+    })
+    try:
+        sid = _fritz_login_and_get_sid(session, fritz_url, username, password)
+
+        deadline = time.monotonic() + max(0, wait_seconds)
+        last_seen_name = None
+        last_seen_uid = None
+        last_seen_online = None
+
+        while True:
+            devices_json = _fritz_fetch_netdev_devices(session, fritz_url, sid)
+            uid, name, is_online = _fritz_find_device_by_mac(devices_json, mac_address)
+            last_seen_name, last_seen_uid, last_seen_online = name, uid, is_online
+
+            if is_online:
+                return {
+                    "success": True,
+                    "message": "Gerät ist online.",
+                    "uid": uid,
+                    "name": name,
+                }
+
+            if time.monotonic() >= deadline:
+                return {
+                    "success": False,
+                    "message": "Gerät bleibt offline (FRITZ!Box meldet es weiterhin getrennt).",
+                    "uid": uid,
+                    "name": name,
+                    "online": last_seen_online,
+                }
+
+            time.sleep(max(1, poll_interval))
     finally:
         session.close()
 
@@ -306,19 +472,39 @@ async def bootserver(interaction: discord.Interaction):
         fritz_user = FRITZ_USER.strip('"') if FRITZ_USER else FRITZ_USER
         fritz_password = FRITZ_PASSWORD.strip('"') if FRITZ_PASSWORD else FRITZ_PASSWORD
         
-        # Wake-on-LAN über FRITZ!Box senden
-        result = send_wol_via_fritzbox(FRITZ_URL, fritz_user, fritz_password, SERVER_MAC)
+        # Wake-on-LAN über FRITZ!Box senden (blocking -> Thread)
+        result = await asyncio.to_thread(send_wol_via_fritzbox, FRITZ_URL, fritz_user, fritz_password, SERVER_MAC)
         
         if result["success"]:
-            # Erfolg!
-            success_message = f"✅ {result['message']}\nServer fährt hoch. Bitte 2-3 Min warten."
-            await interaction.followup.send(success_message)
+            await interaction.followup.send(f"✅ {result['message']}\n🔎 Prüfe, ob der Server online geht ...")
+
+            # Verifikation: wird das Gerät wirklich online?
+            verify = await asyncio.to_thread(
+                confirm_device_online_via_fritzbox,
+                FRITZ_URL,
+                fritz_user,
+                fritz_password,
+                SERVER_MAC,
+                150,
+                10,
+            )
+
+            if verify.get("success"):
+                await interaction.followup.send("🚀 Server ist online (FRITZ!Box meldet Verbindung aktiv).")
+            else:
+                await interaction.followup.send(
+                    "⚠️ Wake wurde gesendet, aber die FRITZ!Box sieht den Server weiterhin offline.\n"
+                    "Wenn der manuelle Button funktioniert, poste bitte einmal den Browser-Network-Request von 'Gerät starten' (Copy as cURL), dann matchen wir ihn 1:1."
+                )
             
             # Cooldown aktualisieren
             update_cooldown()
             
-            # Optionale Ankündigung im Channel
-            if DISCORD_ANNOUNCE_CHANNEL_ID > 0:
+            # Cooldown aktualisieren
+            update_cooldown()
+
+            # Optionale Ankündigung im Channel nur bei bestätigtem Online-Status
+            if verify.get("success") and DISCORD_ANNOUNCE_CHANNEL_ID > 0:
                 try:
                     channel = bot.get_channel(DISCORD_ANNOUNCE_CHANNEL_ID)
                     if channel:
