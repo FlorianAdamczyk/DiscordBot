@@ -232,7 +232,9 @@ def send_wol_via_fritzbox(fritz_url: str, username: str, password: str, mac_addr
 
         return {
             "success": False,
-            "message": f"WOL-Request wurde gesendet, aber keine gültige Bestätigung erhalten (HTTP {last_status}).",
+            "message": f"WOL-Request wurde gesendet, aber keine gültige Bestätigung erhalten (HTTP {last_status}). "
+                      f"FRITZ!Box WOL funktioniert möglicherweise nur über die direkte Weboberfläche. "
+                      f"Bitte prüfen Sie die FRITZ!Box-Einstellungen oder verwenden Sie TR-064 lokal.",
         }
             
     except requests.exceptions.Timeout:
